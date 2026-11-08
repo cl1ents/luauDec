@@ -48,3 +48,7 @@ out
 .github
 # Build output
 build/
+
+# Nix
+result
+result-*

@@ -1,0 +1,45 @@
+{
+  "nodes": {
+    "luau": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1793387574,
+        "narHash": "sha256-r1+Sm/yk1QtyjPEw0qnGaAiWrzYTt26Q31Hq6RfWCfY=",
+        "owner": "luau-lang",
+        "repo": "luau",
+        "rev": "2a3d8937c19c8fd9f7b72b6ec9068c62760e6588",
+        "type": "github"
+      },
+      "original": {
+        "owner": "luau-lang",
+        "ref": "0.745",
+        "repo": "luau",
+        "type": "github"
+      }
+    },
+    "nixpkgs": {
+      "locked": {
+        "lastModified": 1793876309,
+        "narHash": "sha256-Wojg9lIH/hDH91iDVH2/EPw8oDSpxjxhXONbU1yf4Zg=",
+        "owner": "NixOS",
+        "repo": "nixpkgs",
+        "rev": "f9a75f41be3a74eab55d3a7679d34ad6cc0da977",
+        "type": "github"
+      },
+      "original": {
+        "owner": "NixOS",
+        "ref": "nixos-unstable",
+        "repo": "nixpkgs",
+        "type": "github"
+      }
+    },
+    "root": {
+      "inputs": {
+        "luau": "luau",
+        "nixpkgs": "nixpkgs"
+      }
+    }
+  },
+  "root": "root",
+  "version": 7
+}
