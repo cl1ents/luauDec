@@ -822,9 +822,17 @@ AstExpr* FunctionBuilder::constant(uint32_t index)
     }
 }
 
-AstExpr* FunctionBuilder::closure(uint32_t insnIndex, const FunctionProto& child, uint32_t& next, uint8_t target, AstLocal*& selfLocal)
+AstExpr* FunctionBuilder::closure(
+    uint32_t insnIndex,
+    const FunctionProto& child,
+    uint32_t& next,
+    uint8_t target,
+    AstLocal*& selfLocal,
+    bool& selfDeclared
+)
 {
     selfLocal = nullptr;
+    selfDeclared = false;
     std::vector<AstLocal*> captured;
 
     uint32_t j = insnIndex + 1;
@@ -846,7 +854,8 @@ AstExpr* FunctionBuilder::closure(uint32_t insnIndex, const FunctionProto& child
             int web = regionDepth == 0 ? flow.defWeb(flow.unitOfInsn[insnIndex], target) : -1;
             if (pureDepth > 0)
                 throw PureViolation{};
-            selfLocal = web >= 0 && webLocals[web] ? webLocals[web] : declareLocal(web, child.debugName.value_or("fn"));
+            selfDeclared = !(web >= 0 && webLocals[web]);
+            selfLocal = selfDeclared ? declareLocal(web, child.debugName.value_or("fn")) : webLocals[web];
             captured.push_back(selfLocal);
             continue;
         }
@@ -2039,10 +2048,16 @@ uint32_t FunctionBuilder::emitInstruction(uint32_t index, int unit)
 
         uint32_t next;
         AstLocal* self;
-        AstExpr* func = closure(index, ctx.chunk.protos[protoId], next, a, self);
+        bool selfDeclared;
+        AstExpr* func = closure(index, ctx.chunk.protos[protoId], next, a, self, selfDeclared);
         if (self)
         {
-            emitStatement(make<AstStatLocalFunction>(Location(), self, func->as<AstExprFunction>(), false, Position::missing()));
+            // a recursive function; an existing variable (e.g. `local f` declared earlier and captured by other closures)
+            // is assigned, not declared again: a second `local function f` would leave the earlier captures nil
+            if (selfDeclared)
+                emitStatement(make<AstStatLocalFunction>(Location(), self, func->as<AstExprFunction>(), false, Position::missing()));
+            else
+                emitStatement(make<AstStatFunction>(Location(), make<AstExprLocal>(Location(), self, false), func->as<AstExprFunction>()));
             Slot& slot = state.slots[a];
             slot = Slot{};
             slot.kind = Slot::Kind::Var;

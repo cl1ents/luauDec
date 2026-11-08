@@ -141,7 +141,8 @@ private:
 
     // expressions
     AstExpr* constant(uint32_t index);
-    AstExpr* closure(uint32_t insnIndex, const FunctionProto& child, uint32_t& next, uint8_t target, AstLocal*& selfLocal);
+    // selfLocal: the variable a recursive closure refers to itself by; selfDeclared: it is new (else it already existed)
+    AstExpr* closure(uint32_t insnIndex, const FunctionProto& child, uint32_t& next, uint8_t target, AstLocal*& selfLocal, bool& selfDeclared);
     AstExpr* field(AstExpr* object, const std::string& name);
     AstExpr* importExpr(uint32_t aux);
     const std::string& constantString(uint32_t index);

@@ -81,7 +81,7 @@ std::string fromCall(AstExprCall* call)
 
 bool isValidIdentifier(const std::string& name)
 {
-    if (name.empty() || name.size() > 40 || isdigit((unsigned char)name[0]))
+    if (name.empty() || isdigit((unsigned char)name[0]))
         return false;
     for (char c : name)
         if (!isalnum((unsigned char)c) && c != '_')
@@ -123,7 +123,8 @@ std::string Namer::firstAvailable(std::initializer_list<const char*> candidates)
 
 const char* Namer::declare(const std::string& requested)
 {
-    bool generic = !isValidIdentifier(requested);
+    // a long suggestion (e.g. a field path) makes a poor local name
+    bool generic = !isValidIdentifier(requested) || requested.size() > 40;
     std::string base = generic ? "v" : requested;
 
     std::string name = base;
