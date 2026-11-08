@@ -74,4 +74,9 @@ if(BUILD_TESTING)
     add_executable(luauDec.tests tests/RoundTrip.cpp)
     target_link_libraries(luauDec.tests PRIVATE luaudec Luau.Compiler Luau.VM)
     add_test(NAME roundtrip COMMAND luauDec.tests ${CMAKE_CURRENT_SOURCE_DIR}/tests/corpus)
+
+    # Not a test: decompiles a directory of bytecode files and compares the recompiled programs (tests/Bench.cpp).
+    add_executable(luauDec.bench tests/Bench.cpp)
+    target_include_directories(luauDec.bench PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+    target_link_libraries(luauDec.bench PRIVATE luaudec Luau.Compiler)
 endif()
