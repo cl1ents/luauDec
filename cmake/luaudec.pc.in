@@ -1,0 +1,8 @@
+libdir=@CMAKE_INSTALL_FULL_LIBDIR@
+includedir=@CMAKE_INSTALL_FULL_INCLUDEDIR@
+
+Name: luaudec
+Description: Luau bytecode decompiler
+Version: @PROJECT_VERSION@
+Libs: -L${libdir} -lluaudec
+Cflags: -I${includedir}

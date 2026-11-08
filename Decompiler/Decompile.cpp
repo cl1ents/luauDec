@@ -1,4 +1,4 @@
-#include "Decompiler/Decompile.h"
+#include "luauDec/Decompile.h"
 
 #include "Decompiler/BytecodeReader.h"
 #include "Decompiler/Emitter.h"

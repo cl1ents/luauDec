@@ -3,7 +3,7 @@
 
 #include "Luau/Compiler.h"
 
-#include "Decompiler/Decompile.h"
+#include "luauDec/Decompile.h"
 
 #include <algorithm>
 #include <cstdio>

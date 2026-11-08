@@ -1,6 +1,6 @@
 #include "Decompiler/FunctionBuilder.h"
 
-#include "Decompiler/Decompile.h"
+#include "luauDec/Decompile.h"
 
 #include "Luau/BytecodeUtils.h"
 

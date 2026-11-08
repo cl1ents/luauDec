@@ -1,6 +1,6 @@
 #include "Decompiler/BytecodeReader.h"
 
-#include "Decompiler/Decompile.h"
+#include "luauDec/Decompile.h"
 
 #include "Luau/Bytecode.h"
 

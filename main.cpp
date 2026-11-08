@@ -1,4 +1,4 @@
-#include "Decompiler/Decompile.h"
+#include "luauDec/Decompile.h"
 
 #include "Luau/Compiler.h"
 
