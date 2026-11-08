@@ -1,5 +1,6 @@
 #include "luauDec/Decompile.h"
 
+#include "Luau/Bytecode.h"
 #include "Luau/Compiler.h"
 
 #include <cstring>
@@ -21,8 +22,14 @@ static bool looksLikeBytecode(const std::string& data)
     if (data.empty())
         return false;
     unsigned char version = static_cast<unsigned char>(data[0]);
-    // source text starts with printable characters; bytecode with a small version byte (0 = compile error blob)
-    return version < 32 && version != '\t' && version != '\n' && version != '\r';
+    if (version == 0) // compile error blob
+        return true;
+    // Bytecode version 13 is '\r', so the version byte alone does not tell bytecode from text: a version 4+ blob is
+    // followed by its type information version (1..3), which is never a text byte after '\r' or a printable character.
+    if (version < LBC_VERSION_MIN || version > LBC_VERSION_MAX || data.size() < 2)
+        return false;
+    unsigned char typesVersion = static_cast<unsigned char>(data[1]);
+    return typesVersion >= LBC_TYPE_VERSION_MIN && typesVersion <= LBC_TYPE_VERSION_MAX;
 }
 
 int main(int argc, char** argv)
