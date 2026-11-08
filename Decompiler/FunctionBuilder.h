@@ -121,6 +121,9 @@ private:
     // value regions
     AstExpr* buildRegion(const ValueRegion& region);
     AstExpr* walkValue(uint32_t insn, uint32_t end, uint8_t reg, uint32_t regionBegin);
+    AstExpr* regionStatements(const ValueRegion& region);
+    AstStatBlock* statementPath(uint32_t begin, uint32_t end, uint8_t reg, uint32_t regionBegin, AstLocal* result);
+    void walkStatements(uint32_t insn, uint32_t end, uint8_t reg, uint32_t regionBegin, AstLocal* result);
     AstExpr* makeIfElse(AstExpr* cond, AstExpr* ifTrue, AstExpr* ifFalse);
 
     // registers
@@ -132,6 +135,8 @@ private:
     AstLocal* declareLocal(int web, const std::string& suggestion);
     void materialize(uint8_t reg);
     void flushPending(bool everything);
+    void flushSlot(uint8_t reg, bool overwritten);
+    void retire(uint8_t reg);
     void hoist(uint32_t begin, uint32_t end);
 
     // statements
@@ -183,6 +188,8 @@ private:
     uint64_t nextSeq = 1;
     std::vector<Group> groups;
     std::vector<AstLocal*> webLocals;
+    // locals that a call can assign: upvalues, and locals captured by a closure
+    std::unordered_set<AstLocal*> sharedLocals;
 
     std::vector<std::vector<AstStat*>*> blocks;
     size_t statementCount = 0;

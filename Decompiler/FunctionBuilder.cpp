@@ -184,6 +184,7 @@ FunctionBuilder::FunctionBuilder(DecompileContext& ctx, const FunctionProto& pro
     , depth(depth)
 {
     webLocals.assign(flow.webs.size(), nullptr);
+    sharedLocals.insert(this->upvalues.begin(), this->upvalues.end());
     backJumps.resize(flow.units.size());
 
     for (uint32_t u = 0; u < flow.units.size(); ++u)
@@ -204,6 +205,19 @@ AstName FunctionBuilder::name(const std::string& text)
     return AstName(storage);
 }
 
+// Luau requires `return`, `break` and `continue` to end their block. Nothing can jump into the middle of a structured block,
+// so statements after one of them never run; they appear when a shared exit is both repeated at a jump site and emitted
+// where it was in the bytecode.
+static void dropUnreachable(std::vector<AstStat*>& body)
+{
+    for (size_t i = 0; i < body.size(); ++i)
+        if (body[i]->is<AstStatReturn>() || body[i]->is<AstStatBreak>() || body[i]->is<AstStatContinue>())
+        {
+            body.resize(i + 1);
+            return;
+        }
+}
+
 AstStatBlock* FunctionBuilder::buildBody(std::vector<AstLocal*>& params)
 {
     std::vector<AstStat*> body;
@@ -218,6 +232,8 @@ AstStatBlock* FunctionBuilder::buildBody(std::vector<AstLocal*>& params)
         params.push_back(local);
         if (flow.paramWebs[r] >= 0)
             webLocals[flow.paramWebs[r]] = local;
+        if (flow.paramWebs[r] >= 0 && flow.webs[flow.paramWebs[r]].captured)
+            sharedLocals.insert(local);
 
         Slot& slot = state.slots[r];
         slot.kind = Slot::Kind::Var;
@@ -340,6 +356,9 @@ bool FunctionBuilder::isMovable(AstExpr* e) const
 {
     if (e->is<AstExprGlobal>())
         return true;
+    // within one expression nothing assigns a local, unless a call does it through a closure that shares it
+    if (auto l = e->as<AstExprLocal>())
+        return sharedLocals.count(l->local) == 0;
     if (auto i = e->as<AstExprIndexName>(); i && i->op == '.' && i->expr->is<AstExprGlobal>())
         return true;
     return isPure(e);
@@ -371,12 +390,18 @@ AstLocal* FunctionBuilder::declareLocal(int web, const std::string& suggestion)
 
     AstLocal* local = make<AstLocal>(AstName(ctx.namer.declare(base)), Location(), nullptr, depth, 0, nullptr);
     if (web >= 0)
+    {
         webLocals[web] = local;
+        if (flow.webs[web].captured)
+            sharedLocals.insert(local);
+    }
     return local;
 }
 
 void FunctionBuilder::define(int unit, uint8_t reg, AstExpr* expr, bool truncated, bool multret)
 {
+    retire(reg);
+
     Slot slot;
     slot.expr = expr;
     slot.truncated = truncated;
@@ -438,6 +463,9 @@ void FunctionBuilder::defineGroup(int unit, uint8_t first, uint8_t count, AstExp
             if (web >= 0 && (webLocals[web] || mustBeVariable(web, expr)))
                 variable = true;
         }
+
+    for (uint8_t i = 0; i < count; ++i)
+        retire(uint8_t(first + i));
 
     int group = int(groups.size());
     groups.push_back({expr, first, count});
@@ -546,38 +574,62 @@ void FunctionBuilder::flushPending(bool everything)
 
     std::sort(pending.begin(), pending.end());
     for (auto [seq, r] : pending)
+        flushSlot(uint8_t(r), false);
+}
+
+// Emits a pending value: a call whose result is never read as a statement, anything else as a local.
+void FunctionBuilder::flushSlot(uint8_t r, bool overwritten)
+{
+    Slot& slot = state.slots[r];
+    if (slot.kind != Slot::Kind::Pending)
+        return;
+
+    bool unused = slot.group < 0 && (overwritten || (slot.web >= 0 && flow.webs[slot.web].useCount == 0));
+    bool named = slot.web >= 0 && flow.webs[slot.web].debugLocal >= 0;
+    if (unused && slot.expr->is<AstExprCall>() && !named)
     {
-        Slot& slot = state.slots[r];
-        if (slot.kind != Slot::Kind::Pending)
-            continue;
-
-        bool unused = slot.group < 0 && slot.web >= 0 && flow.webs[slot.web].useCount == 0;
-        if (unused && slot.multret == false && slot.expr->is<AstExprCall>() && slot.web >= 0 && flow.webs[slot.web].debugLocal < 0)
-        {
-            // a call whose result is never read: keep it as a plain statement
-            if (pureDepth > 0)
-                throw PureViolation{};
-            blocks.back()->push_back(make<AstStatExpr>(Location(), slot.expr));
-            ++statementCount;
-            slot = Slot{};
-            continue;
-        }
-
-        if (slot.multret && unused)
-        {
-            if (pureDepth > 0)
-                throw PureViolation{};
-            if (slot.expr->is<AstExprCall>())
-            {
-                blocks.back()->push_back(make<AstStatExpr>(Location(), slot.expr));
-                ++statementCount;
-            }
-            slot = Slot{};
-            continue;
-        }
-
-        materialize(uint8_t(r));
+        // a call whose result is never read: keep it as a plain statement
+        if (pureDepth > 0)
+            throw PureViolation{};
+        blocks.back()->push_back(make<AstStatExpr>(Location(), slot.expr));
+        ++statementCount;
+        slot = Slot{};
+        return;
     }
+
+    if (slot.multret && unused)
+    {
+        if (pureDepth > 0)
+            throw PureViolation{};
+        slot = Slot{};
+        return;
+    }
+
+    materialize(r);
+}
+
+// The register of a pending value is about to be written without the value having been read. A value whose evaluation
+// matters (a call, an index that may run a metamethod) still runs, in order: emit it, after anything pending before it.
+void FunctionBuilder::retire(uint8_t reg)
+{
+    const Slot& target = state.slots[reg];
+    if (target.kind != Slot::Kind::Pending || isPure(target.expr))
+        return;
+    if (pureDepth > 0)
+        throw PureViolation{};
+
+    std::vector<std::pair<uint64_t, int>> earlier;
+    for (int r = 0; r < 256; ++r)
+    {
+        const Slot& s = state.slots[r];
+        if (r != reg && s.kind == Slot::Kind::Pending && !isPure(s.expr) && s.seq < target.seq)
+            earlier.push_back({s.seq, r});
+    }
+    std::sort(earlier.begin(), earlier.end());
+    for (auto [seq, r] : earlier)
+        flushSlot(uint8_t(r), false);
+
+    flushSlot(reg, true);
 }
 
 std::vector<AstExpr*> FunctionBuilder::consume(const std::vector<uint8_t>& regs, int unit, bool lastIsMultiValue)
@@ -940,6 +992,35 @@ AstExpr* FunctionBuilder::makeIfElse(AstExpr* cond, AstExpr* ifTrue, AstExpr* if
 
 AstExpr* FunctionBuilder::buildRegion(const ValueRegion& region)
 {
+    // the registers the region reads: a region that is a flow unit has its upward-exposed uses; a region nested in
+    // another one (built as statements) is not a unit, so take what its instructions read
+    uint32_t unit = flow.unitOfInsn[region.begin];
+    bool isUnit = flow.units[unit].region >= 0 && flow.units[unit].first == region.begin;
+    std::vector<uint8_t> inputs;
+    if (isUnit)
+        inputs = flow.units[unit].uses;
+    else
+        for (uint32_t k = region.begin; k < region.end; ++k)
+            inputs.insert(inputs.end(), flow.insns[k].uses.begin(), flow.insns[k].uses.end());
+
+    if (regionDepth == 0 && isUnit)
+    {
+        // instructions inside the region read registers, not def-use webs: point inputs that are named variables at
+        // them (a variable assigned in both arms of an earlier `if` is not in its register's slot after the `if`)
+        for (uint8_t r : inputs)
+        {
+            int w = flow.useWeb(unit, r);
+            Slot& s = state.slots[r];
+            if (w >= 0 && webLocals[w] && !(s.kind == Slot::Kind::Var && s.local == webLocals[w]))
+            {
+                s = Slot{};
+                s.kind = Slot::Kind::Var;
+                s.local = webLocals[w];
+                s.web = w;
+            }
+        }
+    }
+
     if (pureDepth == 0)
     {
         // the region reads its inputs after everything still pending; name inputs that were computed earlier than that
@@ -949,7 +1030,7 @@ AstExpr* FunctionBuilder::buildRegion(const ValueRegion& region)
                 newest = std::max(newest, s.seq);
 
         uint64_t limit = 0;
-        for (uint8_t r : flow.units[flow.unitOfInsn[region.begin]].uses)
+        for (uint8_t r : inputs)
         {
             const Slot& s = state.slots[r];
             if (s.kind == Slot::Kind::Pending && !isMovable(s.expr) && s.seq < newest)
@@ -963,6 +1044,22 @@ AstExpr* FunctionBuilder::buildRegion(const ValueRegion& region)
         std::sort(victims.begin(), victims.end());
         for (auto [seq, r] : victims)
             materialize(uint8_t(r));
+
+        // a read of one value of a multi-value call (`local ok, v = pcall(...)`) names the whole group with a statement,
+        // which the region cannot hold: name it before the region
+        for (uint8_t r : inputs)
+            if (state.slots[r].kind == Slot::Kind::Pending && state.slots[r].group >= 0)
+                materialize(r);
+
+        // only the region's first test runs on every path; a value computed before the region and read further in runs
+        // on some paths only if it moves into the expression
+        const std::vector<uint8_t>& firstUses = flow.insns[region.begin].uses;
+        for (uint8_t r : inputs)
+        {
+            const Slot& s = state.slots[r];
+            if (s.kind == Slot::Kind::Pending && !isMovable(s.expr) && std::find(firstUses.begin(), firstUses.end(), r) == firstUses.end())
+                materialize(r);
+        }
     }
 
     State outer = state;
@@ -983,9 +1080,23 @@ AstExpr* FunctionBuilder::buildRegion(const ValueRegion& region)
     {
         --regionDepth;
         --pureDepth;
-        if (pureDepth == 0)
-            throw DecompileError("short-circuit expression contains a statement");
-        throw;
+        if (pureDepth > 0)
+            throw;
+        state = outer;
+        regionConsumed = std::move(savedConsumed);
+        regionSeqStart = savedSeqStart;
+        return regionStatements(region);
+    }
+    catch (const DecompileError&)
+    {
+        --regionDepth;
+        --pureDepth;
+        if (pureDepth > 0)
+            throw;
+        state = outer;
+        regionConsumed = std::move(savedConsumed);
+        regionSeqStart = savedSeqStart;
+        return regionStatements(region);
     }
     catch (...)
     {
@@ -1008,6 +1119,115 @@ AstExpr* FunctionBuilder::buildRegion(const ValueRegion& region)
     regionSeqStart = savedSeqStart;
 
     return result;
+}
+
+// A value region that one expression cannot hold (it has statements, e.g. a function inlined with its early returns):
+// declare a local and assign it on every path with ordinary statements.
+AstExpr* FunctionBuilder::regionStatements(const ValueRegion& region)
+{
+    AstLocal* result = declareLocal(-1, "");
+    emitStatement(make<AstStatLocal>(Location(), array<AstLocal*>({result}), AstArray<AstExpr*>{}, std::nullopt));
+    walkStatements(region.begin, region.end, region.reg, region.begin, result);
+    return make<AstExprLocal>(Location(), result, false);
+}
+
+AstStatBlock* FunctionBuilder::statementPath(uint32_t begin, uint32_t end, uint8_t reg, uint32_t regionBegin, AstLocal* result)
+{
+    std::vector<AstStat*> body;
+    blocks.push_back(&body);
+    ctx.namer.pushScope();
+    State saved = state;
+    try
+    {
+        walkStatements(begin, end, reg, regionBegin, result);
+    }
+    catch (...)
+    {
+        state = saved;
+        ctx.namer.popScope();
+        blocks.pop_back();
+        throw;
+    }
+    state = saved;
+    ctx.namer.popScope();
+    blocks.pop_back();
+    dropUnreachable(body);
+    return make<AstStatBlock>(Location(), array(body));
+}
+
+// walkValue's statement form: every path ends with `result = <reg>`.
+void FunctionBuilder::walkStatements(uint32_t i, uint32_t end, uint8_t reg, uint32_t regionBegin, AstLocal* result)
+{
+    auto resultExpr = [&] {
+        return make<AstExprLocal>(Location(), result, false);
+    };
+
+    for (int steps = 0;; ++steps)
+    {
+        if (steps > 100000)
+            throw DecompileError("short-circuit expression too complex");
+
+        if (i == end)
+        {
+            emitAssign(resultExpr(), consumeOne(reg, -1));
+            return;
+        }
+        if (i > end)
+            throw DecompileError("short-circuit expression escapes its region");
+
+        const Insn& insn = flow.insns[i];
+
+        if (isConditionalJump(insn.op))
+        {
+            ValueRegion inner;
+            if (i != regionBegin && flow.tryRegion(i, inner) && inner.end <= end)
+            {
+                define(-1, inner.reg, buildRegion(inner));
+                i = inner.end;
+                continue;
+            }
+
+            uint32_t target = uint32_t(flow.insnAtPc[insn.target]);
+
+            if ((insn.op == LOP_JUMPIF || insn.op == LOP_JUMPIFNOT) && LUAU_INSN_A(insn.word) == reg && target == end)
+            {
+                // `x or rest` / `x and rest`: result = x, then the rest only when x lets it run
+                emitAssign(resultExpr(), consumeOne(reg, -1));
+                AstExpr* cond = resultExpr();
+                if (insn.op == LOP_JUMPIF)
+                    cond = make<AstExprUnary>(Location(), AstExprUnary::Op::Not, cond);
+                AstStatBlock* rest = statementPath(i + 1, end, reg, regionBegin, result);
+                emitStatement(make<AstStatIf>(Location(), cond, rest, nullptr, std::nullopt, std::nullopt));
+                return;
+            }
+
+            AstExpr* cond = jumpCondition(insn, -1);
+            // both paths start from this state: a value still pending here would run in a branch and again before the `if`
+            flushPending(false);
+            AstStatBlock* taken = statementPath(target, end, reg, regionBegin, result);
+            AstStatBlock* fallthrough = statementPath(i + 1, end, reg, regionBegin, result);
+            if (auto u = cond->as<AstExprUnary>(); u && u->op == AstExprUnary::Op::Not)
+                emitStatement(make<AstStatIf>(Location(), u->expr, fallthrough, taken, std::nullopt, std::nullopt));
+            else
+                emitStatement(make<AstStatIf>(Location(), cond, taken, fallthrough, std::nullopt, std::nullopt));
+            return;
+        }
+
+        if (insn.op == LOP_JUMP || insn.op == LOP_JUMPX)
+        {
+            i = uint32_t(flow.insnAtPc[insn.target]);
+            continue;
+        }
+
+        if (insn.op == LOP_LOADB && insn.target >= 0)
+        {
+            define(-1, LUAU_INSN_A(insn.word), make<AstExprConstantBool>(Location(), LUAU_INSN_B(insn.word) != 0));
+            i = uint32_t(flow.insnAtPc[insn.target]);
+            continue;
+        }
+
+        i = emitInstruction(i, -1);
+    }
 }
 
 AstExpr* FunctionBuilder::walkValue(uint32_t i, uint32_t end, uint8_t reg, uint32_t regionBegin)
