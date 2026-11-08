@@ -2,7 +2,7 @@
 
 ![luauDec logo](luauDec.png)
 
-Decompiler for Luau (https://luau-lang.org/) written by xgladius
+Decompiler for Luau (https://luau-lang.org/) written by xgladius, updated to Luau 0.745 by [cl1ents](https://github.com/cl1ents) with Claude Opus 5.5
 
 luauDec is a decompiler for the Luau language created by Roblox. It rebuilds a Luau AST from compiled bytecode and prints it as readable, editable source.
 
