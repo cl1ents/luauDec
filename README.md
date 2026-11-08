@@ -25,6 +25,19 @@ The decompiler was designed to have a few things in mind,
 1. `git clone --recursive https://github.com/xgladius/luauDec.git`
 2. `cd luauDec`
 3. `cmake -B build && cmake --build build`
+4. Optionally `cmake --install build` (or `--component library` / `--component cli` for just one half)
+
+Set `-DLUAUDEC_BUILD_CLI=OFF` to build only the library, and `-DLUAUDEC_LUAU_SOURCE_DIR=<path>` to build against a Luau checkout other than the submodule.
+
+## Nix
+
+The flake builds against the same Luau release as the submodule, so no `--recursive` checkout is needed.
+
+- `nix run github:cl1ents/luauDec -- script.luau` runs the CLI
+- `nix build .#cli` builds `bin/luauDec`
+- `nix build .#lib` builds the library: `lib/libluaudec.a`, `include/luauDec/Decompile.h`, plus CMake and pkg-config files
+- `nix build` builds both
+- `nix develop` opens a shell with CMake, Ninja and a compiler
 
 # Usage
 
@@ -35,6 +48,30 @@ luauDec [-O<n>] [-g<n>] <file>
 `<file>` is either Luau bytecode or Luau source. Source is compiled first (with the given optimization and debug levels), which is handy for seeing what the decompiler makes of a script. Use `-` to read from stdin.
 
 With debug information (`-g2`), local and parameter names come from the bytecode. Without it, names are guessed from how values are produced: `game:GetService("Players")` becomes `Players`, `require(x.Remotes)` becomes `Remotes`, loop variables become `i`/`j`/`k` or `k, v`, and table methods get a `self` parameter.
+
+## As a library
+
+The whole API is one function:
+
+```cpp
+#include <luauDec/Decompile.h>
+
+std::string source = Luau::Decompiler::decompile(bytecode); // throws Luau::Decompiler::DecompileError
+```
+
+`libluaudec.a` is self-contained: Luau's AST code is built into it, and the header exposes no Luau types. If your program also links its own copy of Luau, use the same Luau version (0.745).
+
+```cmake
+# installed (or from the Nix `lib` package):
+find_package(luauDec 1 REQUIRED)
+target_link_libraries(myTool PRIVATE luauDec::luaudec)
+
+# or vendored:
+add_subdirectory(luauDec)
+target_link_libraries(myTool PRIVATE luauDec::luaudec)
+```
+
+Without CMake: `pkg-config --cflags --libs luaudec`.
 
 ## How it works
 
