@@ -90,6 +90,13 @@ private:
         bool usedContinue = false;
     };
 
+    struct Alternative
+    {
+        uint32_t begin = 0;
+        uint32_t end = 0;
+        std::vector<uint32_t> exits;
+    };
+
     struct ChainNode
     {
         uint32_t start;
@@ -103,7 +110,12 @@ private:
     };
 
     // blocks
-    AstStatBlock* emitBlock(uint32_t begin, uint32_t end, LoopContext& loop);
+    // exits: the units where control goes when the block ends; a jump to one of them skips the rest of the block
+    // alternative: the else arm of the `if` whose then arm this block is; a jump to its start from this block runs the
+    // else arm instead of the rest of the block
+    AstStatBlock* emitBlock(uint32_t begin, uint32_t end, LoopContext& loop, std::vector<uint32_t> exits, Alternative alternative);
+    AstStatBlock* emitBlock(uint32_t begin, uint32_t end, LoopContext& loop, std::vector<uint32_t> exits = {});
+    std::vector<uint32_t> continuing(uint32_t target, uint32_t end) const;
     void emitRange(uint32_t begin, uint32_t end, LoopContext& loop);
     uint32_t emitLoop(uint32_t unit, uint32_t latch, LoopContext& outer);
     uint32_t emitConditional(uint32_t unit, uint32_t end, LoopContext& loop);
@@ -192,6 +204,8 @@ private:
     std::unordered_set<AstLocal*> sharedLocals;
 
     std::vector<std::vector<AstStat*>*> blocks;
+    std::vector<uint32_t> exits;                     // of the block being emitted (see emitBlock)
+    Alternative alternative;                         // of the block being emitted (see emitBlock)
     size_t statementCount = 0;
     int pureDepth = 0;
     int regionDepth = 0;

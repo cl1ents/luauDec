@@ -244,6 +244,7 @@ AstStatBlock* FunctionBuilder::buildBody(std::vector<AstLocal*>& params)
     LoopContext top;
     emitRange(0, uint32_t(flow.units.size()), top);
     flushPending(true);
+    dropUnreachable(body);
 
     if (!body.empty())
         if (auto ret = body.back()->as<AstStatReturn>(); ret && ret->list.size == 0)
@@ -1616,20 +1617,40 @@ std::vector<FunctionBuilder::ChainNode> FunctionBuilder::parseChain(
 
 // ---------------------------------------------------------------- control flow
 
-AstStatBlock* FunctionBuilder::emitBlock(uint32_t begin, uint32_t end, LoopContext& loop)
+AstStatBlock* FunctionBuilder::emitBlock(uint32_t begin, uint32_t end, LoopContext& loop, std::vector<uint32_t> blockExits)
+{
+    return emitBlock(begin, end, loop, std::move(blockExits), Alternative{});
+}
+
+AstStatBlock* FunctionBuilder::emitBlock(uint32_t begin, uint32_t end, LoopContext& loop, std::vector<uint32_t> blockExits, Alternative blockAlternative)
 {
     std::vector<AstStat*> body;
     blocks.push_back(&body);
     ctx.namer.pushScope();
     State saved = state;
+    std::swap(exits, blockExits);
+    std::swap(alternative, blockAlternative);
 
     emitRange(begin, end, loop);
     flushPending(true);
+    dropUnreachable(body);
 
+    std::swap(exits, blockExits);
+    std::swap(alternative, blockAlternative);
     state = saved;
     ctx.namer.popScope();
     blocks.pop_back();
     return make<AstStatBlock>(Location(), array(body));
+}
+
+// The exits of a sub-block of the current block [.., end) that continues at `target`: reaching the current block's end
+// continues at the current block's exits.
+std::vector<uint32_t> FunctionBuilder::continuing(uint32_t target, uint32_t end) const
+{
+    std::vector<uint32_t> result = {target};
+    if (target == end)
+        result.insert(result.end(), exits.begin(), exits.end());
+    return result;
 }
 
 void FunctionBuilder::emitRange(uint32_t begin, uint32_t end, LoopContext& loop)
@@ -1710,7 +1731,10 @@ void FunctionBuilder::emitJump(uint32_t unit, uint32_t end, LoopContext& loop)
         emitStatement(make<AstStatBreak>(Location()));
     else if (target == loop.continueUnit || (target == loop.headerUnit && target <= int(unit)))
     {
-        if (!(unit + 1 == end && target == loop.fallthroughUnit))
+        // the last statement of a block needs no `continue` only if falling off the block reaches the latch too
+        bool fallsThrough = unit + 1 == end &&
+                            (target == int(end) || std::find(exits.begin(), exits.end(), uint32_t(target)) != exits.end());
+        if (!fallsThrough)
         {
             loop.usedContinue = true;
             emitStatement(make<AstStatContinue>(Location()));
@@ -1719,6 +1743,10 @@ void FunctionBuilder::emitJump(uint32_t unit, uint32_t end, LoopContext& loop)
     else if (target == loop.fallthroughUnit || target == int(end))
     {
         // jump to the end of the enclosing block: nothing to say
+    }
+    else if (unit + 1 == end && std::find(exits.begin(), exits.end(), uint32_t(target)) != exits.end())
+    {
+        // the last statement of the block jumps where the block continues anyway
     }
     else if (AstStat* ret = sharedReturn(uint32_t(target)))
         emitStatement(ret);
@@ -1748,7 +1776,9 @@ AstStat* FunctionBuilder::sharedReturn(uint32_t target)
         return nullptr;
 
     std::vector<AstExpr*> values;
-    for (int r = LUAU_INSN_A(ret.word); r <= LUAU_INSN_A(ret.word) + LUAU_INSN_B(ret.word) - 2; ++r)
+    int first = int(LUAU_INSN_A(ret.word));
+    int count = int(LUAU_INSN_B(ret.word)) - 1;
+    for (int r = first; r < first + count; ++r)
     {
         int w = flow.useWeb(target, uint8_t(r));
         if (w < 0 || !webLocals[w])
@@ -1807,7 +1837,7 @@ uint32_t FunctionBuilder::emitConditional(uint32_t unit, uint32_t end, LoopConte
                     elseBegin = exitFalse;
                     elseEnd = uint32_t(x);
                 }
-                else if (x == loop.fallthroughUnit && x > int(end))
+                else if (x > int(end) && std::find(exits.begin(), exits.end(), uint32_t(x)) != exits.end())
                 {
                     hasElse = true;
                     thenEnd = exitFalse - 1;
@@ -1821,6 +1851,33 @@ uint32_t FunctionBuilder::emitConditional(uint32_t unit, uint32_t end, LoopConte
     {
         thenEnd = end;
         elseEnd = end;
+    }
+    else if (exitFalse > end && exitTrue <= end && alternative.end > alternative.begin && exitFalse == alternative.begin)
+    {
+        // a jump into the else arm of the `if` whose then arm this block is (`if a and b`, with `b` inlined with its
+        // statements): the rest of this block runs only when the jump is not taken, else the else arm, which runs
+        // here once more
+        flushPending(true);
+        hoist(unit, end);
+        Alternative other = alternative;
+        AstStatBlock* rest = emitBlock(exitTrue, end, loop, continuing(end, end), other);
+        // the copy's own variables are new locals; variables it shares with the code after the `if` are hoisted already
+        std::vector<AstLocal*> savedLocals = webLocals;
+        AstStatBlock* otherBlock = emitBlock(other.begin, other.end, loop, other.exits);
+        webLocals = std::move(savedLocals);
+        AstStat* elseBody = otherBlock->body.size == 1 && otherBlock->body.data[0]->is<AstStatIf>() ? otherBlock->body.data[0] : otherBlock;
+        emitStatement(make<AstStatIf>(Location(), cond, rest, elseBody, std::nullopt, std::nullopt));
+        return end;
+    }
+    else if (exitFalse > end && exitTrue <= end && std::find(exits.begin(), exits.end(), exitFalse) != exits.end())
+    {
+        // a jump to where this block continues (e.g. an inlined early return out of an `if` arm) skips the rest of the
+        // block: run the rest only when the jump is not taken
+        flushPending(true);
+        hoist(unit, end);
+        AstStatBlock* rest = emitBlock(exitTrue, end, loop, continuing(end, end));
+        emitStatement(make<AstStatIf>(Location(), cond, rest, nullptr, std::nullopt, std::nullopt));
+        return end;
     }
     else if (AstStat* ret = sharedReturn(exitFalse))
     {
@@ -1842,11 +1899,14 @@ uint32_t FunctionBuilder::emitConditional(uint32_t unit, uint32_t end, LoopConte
     flushPending(true);
     hoist(unit, elseEnd);
 
-    AstStatBlock* thenBlock = emitBlock(exitTrue, thenEnd, loop);
+    Alternative elseArm;
+    if (hasElse)
+        elseArm = {elseBegin, elseEnd, continuing(elseEnd, end)};
+    AstStatBlock* thenBlock = emitBlock(exitTrue, thenEnd, loop, continuing(hasElse ? elseEnd : thenEnd, end), elseArm);
     AstStat* elseBody = nullptr;
     if (hasElse)
     {
-        AstStatBlock* elseBlock = emitBlock(elseBegin, elseEnd, loop);
+        AstStatBlock* elseBlock = emitBlock(elseBegin, elseEnd, loop, continuing(elseEnd, end));
         if (elseBlock->body.size == 1 && elseBlock->body.data[0]->is<AstStatIf>())
             elseBody = elseBlock->body.data[0];
         else if (elseBlock->body.size > 0)
@@ -1921,8 +1981,26 @@ uint32_t FunctionBuilder::emitNumericFor(uint32_t unit, LoopContext& outer)
     (void)outer;
     const Insn& insn = flow.insns[flow.units[unit].first];
     uint8_t a = LUAU_INSN_A(insn.word);
-    uint32_t exit = uint32_t(flow.unitAtPc(insn.target));
-    uint32_t loopUnit = exit - 1;
+
+    // The FORNLOOP jumps back to the instruction after FORNPREP. FORNPREP's own target is usually the instruction after
+    // the FORNLOOP, but the optimizer threads it to wherever that instruction jumps (e.g. the latch of an outer loop).
+    uint32_t bodyPc = insn.pc + insn.length;
+    uint32_t loopUnit = 0;
+    for (uint32_t u = unit + 1; u < flow.units.size(); ++u)
+    {
+        const Unit& candidate = flow.units[u];
+        if (candidate.region >= 0)
+            continue;
+        const Insn& loopInsn = flow.insns[candidate.first];
+        if (loopInsn.op == LOP_FORNLOOP && LUAU_INSN_A(loopInsn.word) == a && loopInsn.target == int(bodyPc))
+        {
+            loopUnit = u;
+            break;
+        }
+    }
+    if (loopUnit == 0)
+        throw DecompileError("numeric for without FORNLOOP");
+    uint32_t exit = loopUnit + 1;
 
     std::vector<AstExpr*> ops = consume({uint8_t(a + 2), a, uint8_t(a + 1)}, int(unit), false);
     AstExpr* step = ops[2];
