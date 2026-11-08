@@ -1,12 +1,19 @@
-//
-// Created by xgladius on 8/7/22.
-//
 #pragma once
-#include <iostream>
-#include <Luau/Transpiler.h>
-#include "BlockGen/include/BlockGen.h"
-#include "Common.h"
 
-namespace Luau::Decompiler {
-    std::string decompile(lua_State* L, std::string& bytecode);
-}
+#include <stdexcept>
+#include <string>
+#include <string_view>
+
+namespace Luau::Decompiler
+{
+
+// Raised for bytecode that cannot be decompiled at all: compile-error blobs, unsupported versions, truncated data.
+struct DecompileError : std::runtime_error
+{
+    using std::runtime_error::runtime_error;
+};
+
+// Decompiles a serialized Luau bytecode blob (versions LBC_VERSION_MIN..LBC_VERSION_MAX) back into Luau source.
+std::string decompile(std::string_view bytecode);
+
+} // namespace Luau::Decompiler

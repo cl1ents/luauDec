@@ -1,4 +1,4 @@
 [submodule "luau"]
 	path = luau
-	url = https://www.github.com/roblox/luau
+	url = https://github.com/luau-lang/luau
 	shallow = true
