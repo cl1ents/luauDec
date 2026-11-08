@@ -4,7 +4,9 @@
 
 Decompiler for Luau (https://luau-lang.org/) written by xgladius
 
-luauDec is a decompiler for the Luau language created by Roblox, leveraging built-in Luau tooling to generate AST, and then transpile that AST into readable code.
+luauDec is a decompiler for the Luau language created by Roblox. It rebuilds a Luau AST from compiled bytecode and prints it as readable, editable source.
+
+Built against Luau **0.745**; reads bytecode versions 3 through 14, including version 13 (the compiler's default target, which adds double-precision vector constants).
 
 # Introduction
 
@@ -22,29 +24,53 @@ The decompiler was designed to have a few things in mind,
 
 1. `git clone --recursive https://github.com/xgladius/luauDec.git`
 2. `cd luauDec`
-3. `cmake . && make`
+3. `cmake -B build && cmake --build build`
+
+# Usage
+
+```
+luauDec [-O<n>] [-g<n>] <file>
+```
+
+`<file>` is either Luau bytecode or Luau source. Source is compiled first (with the given optimization and debug levels), which is handy for seeing what the decompiler makes of a script. Use `-` to read from stdin.
+
+With debug information (`-g2`), local and parameter names come from the bytecode. Without it, names are guessed from how values are produced: `game:GetService("Players")` becomes `Players`, `require(x.Remotes)` becomes `Remotes`, loop variables become `i`/`j`/`k` or `k, v`, and table methods get a `self` parameter.
 
 ## How it works
 
-1. Luau bytecode is fed into the decompiler
-   - The decompiler calls luau_load to produce an LClosure with a Proto member
-2. The decompiler iterates over each child Proto (Proto->p) which are passed to the decompiler's BlockGen<false> class (BlockGen<false> meaning non-main Proto)
-   - The BlockGen<false> class creates a AstExprFunction for each child Proto, which is added to a vector
-     - Proto->code is iterated here to create Ast expressions of the relevant code
-3. The decompiler passes the main Proto, along with the vector of child Proto AstExprFunction to the decompilers BlockGen<true> class (BlockGen<true> meaning main Proto)
-   - The BlockGen<true> class creates a AstStatBlock containing all uses of code in Proto->code and child Protos
-4. The AstStatBlock is passed to Luau's built-in transpiler, which is turned into valid Luau code
- 
+1. `BytecodeReader` parses the bytecode blob into protos, constants, and optional debug info.
+2. `FlowAnalysis` decodes each function's instructions and builds a flow graph. Short-circuit expressions compiled with jumps (`a and f()`, `if c then x else y`, comparisons stored as booleans) are collapsed into single value regions. Reaching definitions then group register writes and reads into webs, one per source-level value or variable.
+3. `FunctionBuilder` walks the instructions in order, keeping a symbolic register file:
+   - A value read once becomes part of the expression that reads it.
+   - A value read several times, captured by a closure, or written on several paths becomes a local.
+   - Evaluation order is preserved; when inlining a value would reorder side effects, the value is named first.
+   - Jump patterns are recognized as `if`/`elseif`/`else`, `while`, `repeat`, numeric and generic `for`, `break` and `continue`. Chains of conditional jumps are folded back into `and`/`or`/`not` conditions.
+4. `Emitter` prints the resulting Luau AST, adding indentation and the parentheses that operator precedence requires.
+
+Anything the decompiler cannot express is left as a `-- luauDec: ...` comment, so the rest of the output stays usable.
+
+## Testing
+
+`ctest --test-dir build` runs `tests/RoundTrip.cpp` over every program in `tests/corpus`. Each program is compiled at -O0/-O1/-O2 × -g0/-g1/-g2 (plus double-precision vectors). The test decompiles the bytecode, recompiles the output, runs both versions, and checks that they print the same thing.
+
+### Known limitations
+
+- At -O2 the compiler inlines small local functions. An inlined `return` from inside a loop becomes a jump past the end of the loop, which has no structured equivalent. luauDec marks it with a comment; see `tests/corpus/25_inlined_early_returns.luau`.
+- `continue` inside `repeat ... until` loops is not reconstructed.
+- `if ... then return end` chains may come out as consecutive `if` statements instead of `elseif`, because the compiler drops the jumps to the shared end. The behavior is the same.
+
 ### Feature list
 
 - [x] StatBlock AST generation
-- [x] Basic arithmetic AST generation (+, -, *, /, %, etc)
-- [x] Reading and writing from constants table AST generation (Proto->k[idx] to AST)
+- [x] Basic arithmetic AST generation (+, -, *, /, //, %, ^, .., unary -, not, #)
+- [x] Reading and writing from constants table AST generation (numbers, strings, booleans, vectors, imports)
 - [x] Call AST generation (print())
   - [x] Arguments (print(1,2,3,4,5,6)
   - [x] Vararg argument (print(...))
+  - [x] Method calls (obj:method())
 - [x] Function AST generation (Proto->p nested subprotos) (function x() print'a' end x())
-  - [x] Newclosure AST generation
+  - [x] Newclosure / dupclosure AST generation
+  - [x] Upvalues, recursive local functions, `function t.f()` and `function t:m()`
 - [x] Return AST generation
   - [x] Normal returns (return 1)
   - [x] Vararg return (return 1,2,3,4)
@@ -52,16 +78,21 @@ The decompiler was designed to have a few things in mind,
   - [x] Setlist support (x = {1, 2, 3, 4})
   - [x] Newtable support (x = {})
   - [x] Settable support (x[1] = 1)
+  - [x] Constructors with fields (x = {a = 1, [k] = 2})
 - [x] Local variable AST generation
-  - [ ] "Smart" local variable names
+  - [x] "Smart" local variable names
 - [x] Numeric for loops (for i=1, 10 do end)
   - [x] Nested numeric for loops (for i=1, 10 do for x=1, 100 do end end)
-- [ ] Range based for loops (for i,v in pairs() do end)
-  - [ ] Nested range based for loops
+- [x] Range based for loops (for i,v in pairs() do end)
+  - [x] Nested range based for loops
 - [x] if statements
   - [x] if then (if true then end)
-  - [ ] Nested if statements
-  - [ ] else
-  - [ ] elseif
+  - [x] Nested if statements
+  - [x] else
+  - [x] elseif
+  - [x] Compound conditions (and, or, not)
 - [x] while statements
   - [x] Nested while statements
+  - [x] break / continue
+- [x] repeat ... until statements
+- [x] Value expressions (a and b, a or b, if-expressions, comparisons stored in locals)
