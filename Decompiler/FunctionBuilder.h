@@ -116,6 +116,7 @@ private:
     AstStatBlock* emitBlock(uint32_t begin, uint32_t end, LoopContext& loop, std::vector<uint32_t> exits, Alternative alternative);
     AstStatBlock* emitBlock(uint32_t begin, uint32_t end, LoopContext& loop, std::vector<uint32_t> exits = {});
     std::vector<uint32_t> continuing(uint32_t target, uint32_t end) const;
+    void limitScopes(std::vector<AstStat*>& body);
     void emitRange(uint32_t begin, uint32_t end, LoopContext& loop);
     uint32_t emitLoop(uint32_t unit, uint32_t latch, LoopContext& outer);
     uint32_t emitConditional(uint32_t unit, uint32_t end, LoopContext& loop);

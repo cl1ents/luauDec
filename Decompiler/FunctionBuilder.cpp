@@ -218,6 +218,86 @@ static void dropUnreachable(std::vector<AstStat*>& body)
         }
 }
 
+namespace
+{
+
+struct LocalReferences : AstVisitor
+{
+    std::unordered_set<AstLocal*>& out;
+
+    explicit LocalReferences(std::unordered_set<AstLocal*>& out)
+        : out(out)
+    {
+    }
+
+    bool visit(AstExprLocal* node) override
+    {
+        out.insert(node->local);
+        return true;
+    }
+};
+
+std::vector<AstLocal*> declaredLocals(AstStat* stat)
+{
+    if (auto local = stat->as<AstStatLocal>())
+        return std::vector<AstLocal*>(local->vars.begin(), local->vars.end());
+    if (auto function = stat->as<AstStatLocalFunction>())
+        return {function->name};
+    return {};
+}
+
+} // namespace
+
+// A function may have at most 200 locals in scope at once. The compiler reuses the registers of locals that went out of
+// scope (typically generated code with one `do ... end` per section); flat output declares them all in one scope. When a
+// block declares that many, wrap each section that no later statement depends on in `do ... end`.
+void FunctionBuilder::limitScopes(std::vector<AstStat*>& body)
+{
+    size_t declared = 0;
+    for (AstStat* stat : body)
+        declared += declaredLocals(stat).size();
+    if (declared <= 150)
+        return;
+
+    std::unordered_map<AstLocal*, size_t> lastUse;
+    std::vector<std::vector<AstLocal*>> declarations(body.size());
+    for (size_t i = 0; i < body.size(); ++i)
+    {
+        declarations[i] = declaredLocals(body[i]);
+        std::unordered_set<AstLocal*> refs(declarations[i].begin(), declarations[i].end());
+        LocalReferences visitor(refs);
+        body[i]->visit(&visitor);
+        for (AstLocal* local : refs)
+            lastUse[local] = i;
+    }
+
+    std::vector<AstStat*> result;
+    for (size_t i = 0; i < body.size();)
+    {
+        if (declarations[i].empty())
+        {
+            result.push_back(body[i++]);
+            continue;
+        }
+        // the section ends after the last use of every local declared in it
+        size_t end = i;
+        for (size_t k = i; k <= end; ++k)
+            for (AstLocal* local : declarations[k])
+                end = std::max(end, lastUse[local]);
+        if (end + 1 == body.size())
+        {
+            // used until the end of the block: stays in its scope
+            result.push_back(body[i++]);
+            continue;
+        }
+        std::vector<AstStat*> section(body.begin() + i, body.begin() + end + 1);
+        limitScopes(section);
+        result.push_back(make<AstStatBlock>(Location(), array(section)));
+        i = end + 1;
+    }
+    body = std::move(result);
+}
+
 AstStatBlock* FunctionBuilder::buildBody(std::vector<AstLocal*>& params)
 {
     std::vector<AstStat*> body;
@@ -245,6 +325,7 @@ AstStatBlock* FunctionBuilder::buildBody(std::vector<AstLocal*>& params)
     emitRange(0, uint32_t(flow.units.size()), top);
     flushPending(true);
     dropUnreachable(body);
+    limitScopes(body);
 
     if (!body.empty())
         if (auto ret = body.back()->as<AstStatReturn>(); ret && ret->list.size == 0)
@@ -1634,6 +1715,7 @@ AstStatBlock* FunctionBuilder::emitBlock(uint32_t begin, uint32_t end, LoopConte
     emitRange(begin, end, loop);
     flushPending(true);
     dropUnreachable(body);
+    limitScopes(body);
 
     std::swap(exits, blockExits);
     std::swap(alternative, blockAlternative);
